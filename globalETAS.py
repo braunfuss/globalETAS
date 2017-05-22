@@ -133,7 +133,10 @@ class Global_ETAS_model(object):
 	#  the grid size by maybe halfish??), there's no real harm in just using (a much simpler) lon,lat lattice with equal angular spacing.
 	#
 	#def __init__(self, catalog=None, lats=[32., 38.], lons=[-117., -114.], mc=2.5, d_x=10., d_y=10., bin_x0=0., bin_y0=0., etas_range_factor=5.0, t_0=dtm.datetime(1990,1,1, tzinfo=tz_utc), t_now=dtm.datetime.now(tzutc), transform_type='equal_area', transform_ratio_max=5., calc_etas=True):
-	def __init__(self, catalog=None, lats=None, lons=None, mc=2.5, mc_etas=None, d_lon=.1, d_lat=.1, bin_lon0=0., bin_lat0=0., etas_range_factor=25.0, etas_range_padding=1.5, etas_fit_factor=1.0, t_0=dtm.datetime(1990,1,1, tzinfo=tz_utc), t_now=dtm.datetime.now(tzutc), transform_type='equal_area', transform_ratio_max=2.5, cat_len=5.*365., calc_etas=True, n_contours=15, etas_cat_range=None, etas_xyz_range=None, p_cat=1.1, q_cat=1.5, ab_ratio_expon=.25, p_etas=None, D_fract=1.5, **kwargs):
+	def __init__(self, catalog=None, lats=None, lons=None, mc=2.5, mc_etas=None, d_lon=.1, d_lat=.1, bin_lon0=0., bin_lat0=0., etas_range_factor=25.0, 
+                          etas_range_padding=1.5, etas_fit_factor=1.0, t_0=dtm.datetime(1990,1,1, tzinfo=tz_utc), t_now=dtm.datetime.now(tzutc), 
+                          t_int_limit=None, transform_type='equal_area', transform_ratio_max=2.5, cat_len=5.*365., calc_etas=True, n_contours=15, 
+                          etas_cat_range=None, etas_xyz_range=None, p_cat=1.1, q_cat=1.5, ab_ratio_expon=1.0, p_etas=None, D_fract=1.5, **kwargs):
 		'''
 		#
 		#  basically: if we are given a catalog, use it. try to extract mc, etc. data from catalog if it's not
@@ -182,11 +185,24 @@ class Global_ETAS_model(object):
 		else:
 			self.t_forecast = mpd.date2num(t_now)
 		#
+		if isinstance(t_int_limit, float):
+			self.t_int_lim = t_int_limit
+		elif isinstance(t_int_limit, numpy.datetime64):
+			self.t_int_lim = mpd.date2num(t_int_limit.tolist())
+		elif isinstance(t_int_limit, dtm.datetime):
+			self.t_int_lim = mpd.date2num(t_int_limit)
+		else:
+			self.t_int_lim = None
+		#
 		mc_etas = (mc_etas or mc)	# mc_eats: minimum mag. for etas calculations -- aka, mc for the catalog, but only do etas for m>mc_eatas.
 		#
+		self.mc_etas = mc_etas
 		# inputs massaged; now update class dictionary.
 		self.__dict__.update(locals())
 		#
+		self.d_lat = d_lat
+		self.d_lon = d_lon
+		#		
 		self.latses = numpy.arange(lats[0], lats[1], d_lat)		# note: if we want lats[1], lons[1] inclusive, we need to add +d_lat, +d_lon
 		self.lonses = numpy.arange(lons[0], lons[1], d_lon)		# to the range().
 		self.n_lat = len(self.latses)
@@ -470,7 +486,11 @@ class Global_ETAS_model(object):
 		#
 		# make a dict of lattice sites and their x,y coordinates.
 		#lattice_dict = {i:{'lat':lat, 'lon':lon, 'j_lon':int(i%n_lon), 'j_lat':int(i/n_lon)} for i, (lat,lon) in enumerate(itertools.product(latses, lonses))}
-		lattice_dict = {i:{'lat':lat, 'lon':lon, 'j_lon':int(i%n_lon), 'j_lat':int(i/n_lon)} for i, (lon,lat,z) in enumerate(self.ETAS_array)}
+		# Wilson: added the area calculation here
+		lattice_dict = {i:{'lat':lat, 'lon':lon, 'j_lon':int(i%n_lon), 'j_lat':int(i/n_lon),
+						  'area': (ggp.WGS84.Inverse(lat-self.d_lat/2., lon, lat+self.d_lat/2., lon)['s12']
+								  * ggp.WGS84.Inverse(lat, lon-self.d_lon/2., lat, lon+self.d_lon/2.)['s12'])/1e6 #ETAS densities in km^-2
+						} for i, (lon,lat,z) in enumerate(self.ETAS_array)}
 		self.lattice_dict=lattice_dict
 		print("len(local_lattice_dict): ", len(self.lattice_dict))
 		#
@@ -528,6 +548,9 @@ class Global_ETAS_model(object):
 			#
 			#print("LLRange: ", lon_min, lat_min, lon_max, lat_max, len(list(site_indices)))
 			#
+			# Wilson: set up array for this quake's ETAS for normalization purposes
+			this_quake_ETAS = numpy.zeros(len(self.ETAS_array['z']), dtype=float)
+			#
 			for site_index in site_indices:
 				X = lattice_dict[site_index]
 				#
@@ -537,10 +560,16 @@ class Global_ETAS_model(object):
 				# this looks right:
 				#local_intensity = 1.0/((75. + et['R_prime'])**1.5)
 				#
-				local_intensity = eq.local_intensity(t=self.t_forecast, lon=X['lon'], lat=X['lat'], p=self.p_etas)
+				local_intensity = eq.local_intensity(t=self.t_forecast, lon=X['lon'], lat=X['lat'], p=self.p_etas, t_int_lim=self.t_int_lim)
 				if numpy.isnan(local_intensity):
 					#print("NAN encountered: ", site_index, self.t_forecast, X['lon'], X['lat'], eq.lon, eq.lat, eq.__dict__)
 					continue
+				#
+				# Wilson: Multiply by the area of the cell if we're outputting a number instead of a rate-density
+				if(self.t_int_lim):
+					local_intensity *= X['area']
+				
+				this_quake_ETAS[site_index] = local_intensity
 				#
 				#self.lattice_sites.add_to_bin(bin_x=lon_bin['index'], bin_y=lat_bin['index'], z=local_intensity)
 				#self.lattice_sites[j_lon][j_lat] += local_intensity
@@ -551,7 +580,25 @@ class Global_ETAS_model(object):
 				#       definition of self.add_to_ETAS() to be something like, self.shared_ETAS_array[3*site_index+2]+=local_intensity.
 				#       that said, it might be possible to accomplish this in the __init__ by declaring the ETAS_array as a list from
 				#       the shared array by reff. (??)
-				self.ETAS_array[site_index][2] += local_intensity
+			#
+			if(self.t_int_lim):
+				# Here I'm doing an integration over time from 't_now' to 't_int_lim' (relative to event time).
+				# If we're doing the integration, then local_intensity spat out rate, so we need to normalize it 
+				# Normalize this_quake_ETAS to N_om.  Values of dmstar and b are the same as those used to calc N_om in the catalog creation,
+				# but those are just hardcoded too.
+				delta_t = (self.t_forecast - quake['event_date_float'])*days2secs
+				t_final = (self.t_int_lim  - quake['event_date_float'])*days2secs
+				tau_normed = quake['t_0']**(1-quake['p'])/(quake['p']-1)  # This normalizes the below integration (0-inf), for use after spatial dist noramalized to N_om
+				integ_result = scipy.integrate.quad(omori_time, delta_t, t_final, args=(tau_normed, quake['t_0'], quake['p']))
+				time_int = integ_result[0]
+				
+				dmstar = 1.0
+				b = 1.0
+				lN_om = b*(quake['mag'] - dmstar - self.mc_etas)
+				N_om = 10.0**lN_om
+				this_quake_ETAS *= (N_om*time_int/numpy.sum(this_quake_ETAS))
+			#			
+			self.ETAS_array['z'] += this_quake_ETAS
 				#
 		#
 		print('finished calculateing ETAS (rtree). wrap up in recarray and return.')
@@ -593,7 +640,7 @@ class Global_ETAS_model(object):
 				if j>=len(self.catalog):continue
 				#
 				#self.ETAS_array[j][2] += eq.local_intensity(t=self.t_forecast, lon=lat_lon[1], lat=lat_lon[0], p=self.p_etas)
-				self.ETAS_array[j][2] += eq.local_intensity(t=self.t_forecast, lon=lon, lat=lat, p=self.p_etas)
+				self.ETAS_array[j][2] += eq.local_intensity(t=self.t_forecast, lon=lon, lat=lat, p=self.p_etas, t_int_lim=self.t_int_lim)
 			#
 			#for lat_tpl,lon_tpl in itertools.product(enumerate(latses), enumerate(lonses)):
 			#	local_intensity = eq.local_intensity(t=self.t_forecast, lon=lon_tpl[1], lat=lat_tpl[1])
@@ -667,7 +714,7 @@ class Global_ETAS_model(object):
 				# note: at this time, we have only the self-similar type local intensity. eventually, we need to split this up. nominally,
 				# this can occur at the Earthquake level, so -- if we so desire, different earthquakes can have differend spatial distributions.
 				#
-				local_intensity = eq.local_intensity(t=self.t_forecast, lon=lon_bin['center'], lat=lat_bin['center'], p=self.p_etas) # anything else?
+				local_intensity = eq.local_intensity(t=self.t_forecast, lon=lon_bin['center'], lat=lat_bin['center'], p=self.p_etas, t_int_lim=self.t_int_lim) # anything else?
 				#
 				#self.lattice_sites.add_to_bin(x=x_bin['center'], y=y_bin['center'], z=1.0/distances['geo'])
 				#
@@ -932,7 +979,7 @@ class Earthquake(object):
 	# include "local" ETAS calculation in this object; aka, each earthquake determines its ETAS range based on rupture length and other factors...
 	# maybe.
 	#def __init__(self, event_date=None, lat=0., lon=0., mag=None, eig_vals=[1., 1.], eig_vecs=[[1.,0.], [0., 1.]], transform_type='equal_area'):
-	def __init__(self, dict_or_recarray, transform_type='equal_area', transform_ratio_max=5., ab_ratio_expon=.5):
+	def __init__(self, dict_or_recarray, transform_type='equal_area', transform_ratio_max=2.0, ab_ratio_expon=1):
 		#
 		# first, load all indexed elements from the input dict or recarray row as class members:
 		if isinstance(dict_or_recarray, dict): self.__dict__.update(dict_or_recarray)
@@ -1031,7 +1078,7 @@ class Earthquake(object):
 		# with a/b ~ sqrt(lambda_1/lambda_2)
 		e_vals = (e_vals or self.e_vals)
 		e_vecs = (e_vecs or self.e_vecs)
-		transform_ratio_max = float(transform_ratio_max or self.transform_ratio_max)
+		transform_ratio_max = transform_ratio_max or self.transform_ratio_max #float(transform_ratio_max or self.transform_ratio_max)
 		transform_type = (transform_type or self.transform_type)
 		ab_ratio_expon = (ab_ratio_expon or self.ab_ratio_expon)
 		ab_ratio_expon = (ab_ratio_expon or .5)
@@ -1059,8 +1106,10 @@ class Earthquake(object):
 		# the ratio of the eigen-values, limit it to too big/too small, and apply in a proper linear transformation... later
 		if min(abs_evals)==0.:
 			ab_ratio = transform_ratio_max**ab_ratio_expon
+		elif transform_ratio_max == None:
+			ab_ratio = (max(abs_evals)/min(abs_evals))**ab_ratio_expon
 		else:
-			ab_ratio = min(transform_ratio_max**ab_ratio_expon, (max(abs_evals)/min(abs_evals))**ab_ratio_expon)
+			ab_ratio = transform_ratio_max**ab_ratio_expon #min(transform_ratio_max**ab_ratio_expon, (max(abs_evals)/min(abs_evals))**ab_ratio_expon)
 		#
 		self.ab_ratio=ab_ratio
 		#print('**debug: self.ab_ratio: ', self.ab_ratio)
@@ -1224,8 +1273,8 @@ class Earthquake(object):
 	#
 	def spherical_dist(self, to_lon_lat=[]):
 		return shperical_dist(lon_lat_from=[self.lon, self.lat], lon_lat_to=to_lon_lat)
-	#		
-	def local_intensity(self, t=None, lon=None, lat=None, p=None, q=None, t0_prime=None):
+	#
+	def local_intensity(self, t=None, lon=None, lat=None, p=None, q=None, t0_prime=None, t_int_lim=None):
 		'''
 		# t0_prime: use this to re-scale the temporal component. we'll transform the initial rate (and effectively minimum delta_t)
 		# to avoid near-field artifacts (where a recent earthquake dominates the ETAS).
@@ -1269,7 +1318,13 @@ class Earthquake(object):
 		# note: everything from here down can (i think) be compiled with numba.jit, if we are so inclined.
 		#
 		#orate = 1./(tau_prime * (t_0_prime + delta_t)**p)
-		orate = 1./(self.tau * (self.t_0 + delta_t)**p)
+        
+		# Wilson: If we're doing a time integration, we do that in the make_etas_rtree method
+		if not t_int_lim:
+			orate = 1./(self.tau * (self.t_0 + delta_t)**p)
+		else:
+			orate = 1.0
+			
 		#
 		# for now, just code up the self-similar 1/(r0+r) formulation. later, we'll split this off to allow different distributions.
 		# radial density (dN/dr). the normalization constant comes from integrating N'(r) --> r=inf = N_om (valid, of course, ony for q>1).
@@ -1293,7 +1348,7 @@ class Earthquake(object):
 		#  (that is resolved by including the r0 term in the effective radius).
 		#circumf = ellipse_circumference_approx1(a=self.e_vals_n[0]*(self.r_0 + et['R_prime']), b=self.e_vals_n[1]*(et['R_prime'] + self.r_0))
 		#circumf = math.pi*et['R']**2.
-		#circumf = math.pi*(self.r_0 + et['R_prime'])**2.
+		#circumf = math.pi*(self.r_0#etas = gep.ETAS_mpp(n_cpu=2*mpp.cpu_count(), catalog=this_catalog, **eq_prams) + et['R_prime'])**2.
 		
 		circumf = 2.*math.pi*(self.r_0 + et['R_prime'])
 		#
@@ -1507,7 +1562,8 @@ def make_ETAS_catalog_mpp(incat=None, lats=[32., 38.], lons=[-117., -114.], mc=2
 		#
 		# TODO: convert thsi call to use "kwds" instead of "args"
 		# i think, however, we could skip all the lats, lons, etc. and just pass the catalog, catatalog_range, and the omori parameters.
-		my_etas_prams = {'incat':incat, 'lats':lats, 'lons':lons, 'mc':mc, 'date_range':['1990-1-1', None], 'D_fract':1.5, 'd_lambda':1.76, 'd_tau': 2.28, 'fit_factor':1.5, 'p':1.1, 'q':1.5, 'dmstar':1.0, 'b1':1.0, 'b2':1.5, 'do_recarray':True, 'catalog_range':catalog_range}
+		#my_etas_prams = {'incat':incat, 'lats':lats, 'lons':lons, 'mc':mc, 'date_range':['1990-1-1', None], 'D_fract':1.5, 'd_lambda':1.76, 'd_tau': 2.28, 'fit_factor':1.5, 'p':1.1, 'q':1.5, 'dmstar':1.0, 'b1':1.0, 'b2':1.5, 'do_recarray':True, 'catalog_range':catalog_range}
+		my_etas_prams = {'incat':incat, 'lats':lats, 'lons':lons, 'mc':mc, 'date_range':date_range, 'D_fract':D_fract, 'd_lambda':d_lambda, 'd_tau':d_tau, 'fit_factor':fit_factor, 'p':p, 'q':q, 'dmstar':dmstar, 'b1':b1, 'b2':b2, 'do_recarray':True, 'catalog_range':catalog_range}
 		#
 		# new syntax (older syntax being depricated? undepricated? keep an eye on this in the future...)
 		#pool_handlers += [P.apply_async(make_ETAS_catalog(**my_etas_prams))]
@@ -1686,6 +1742,7 @@ def make_ETAS_catalog(incat=None, lats=[32., 38.], lons=[-117., -114.], mc=2.5, 
 		#
 		# now, guess the earthquake's orientation based on local seismicity. use earthquakes within some distance based on magnitude.
 		# use a PCA type method or some sort of line-fit. there should be some good PCA libraries, otherwise it's easy to code.
+		# print('**debug: fit_factor = ', fit_factor)
 		area_lat_min = max(-90., rw['lat'] - fit_factor * L_r*km2lat)
 		area_lat_max = min(90., rw['lat'] + fit_factor * L_r*km2lat)
 		# note: i think we have to catch cases where we cross the dateline (aka, into phi<-180, phi>180) and use two index ranges.
@@ -2441,7 +2498,9 @@ def get_eq_properties(m=None, mc=None, b=1.0, d_lambda=1.76, d_tau=2.3, D=1.5, d
 	r_vals.update({'z0':z0})
 	
 	return r_vals
-
+#
+def omori_time(t_var, tau, t_0, p):
+	return 1./(tau * (t_0 + t_var)**p)
 #	
 if __name__=='__main__':
 	# do main stuff...
